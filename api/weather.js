@@ -1,5 +1,3 @@
-// /api/weather.js
-// Vercel serverless function — proxy + synthetic onecall builder
 
 export default async function handler(req, res) {
   try {
@@ -68,8 +66,8 @@ export default async function handler(req, res) {
         wind_speed: nowJson.wind?.speed ?? 0,
         wind_deg: nowJson.wind?.deg ?? 0,
         weather: nowJson.weather || [{ id: 800, description: 'clear' }],
-        uvi: Number((Math.random() * 12).toFixed(1)), // simulated UV index
-        aqi: Number((Math.random() * 300).toFixed(0)), // simulated Air Quality
+        uvi: Number((Math.random() * 12).toFixed(1)), 
+        aqi: Number((Math.random() * 300).toFixed(0)), 
       };
 
       const list = (forecastJson.list || []).slice(0, 40);

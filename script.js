@@ -1,4 +1,3 @@
-/* app.js — client side (no API key here) */
 
 // state
 let currentUnit = 'celsius';
