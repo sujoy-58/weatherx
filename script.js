@@ -1,8 +1,4 @@
-const API_KEY = "83d4f626a5a5e59c2db09961300871fe";
-const GEO_DIRECT = 'https://api.openweathermap.org/geo/1.0/direct';
-const GEO_REVERSE = 'https://api.openweathermap.org/geo/1.0/reverse';
-const WEATHER = 'https://api.openweathermap.org/data/2.5/weather';
-const FORECAST = 'https://api.openweathermap.org/data/2.5/forecast';
+/* app.js — client side (no API key here) */
 
 // state
 let currentUnit = 'celsius';
@@ -175,17 +171,19 @@ function handleSearch() {
     fetchByCityName(q);
 }
 
-// fetch flows
+// ---------- NEW: client now calls serverless /api/weather endpoint ----------
+
 async function fetchByCityName(q) {
     showLoading(); clearError();
     try {
-        const geoRes = await fetch(`${GEO_DIRECT}?q=${encodeURIComponent(q)}&limit=1&appid=${API_KEY}`);
-        if (!geoRes.ok) throw new Error('Location not found');
-        const geo = await geoRes.json();
-        if (!geo || !geo[0]) throw new Error('Location not found');
-        const { lat, lon, name: city, country } = geo[0];
-        currentLocationName = `${city}${country ? ', ' + country : ''}`;
-        await fetchWeatherAndForecast(lat, lon, true);
+        const res = await fetch(`/api/weather?q=${encodeURIComponent(q)}`);
+        if (!res.ok) throw new Error('Location not found');
+        const data = await res.json();
+        // server returns synthetic + coord + maybe name; set location string
+        currentLocationName = (data.name || q) + (data.coord ? '' : '');
+        cachedData = data;
+        renderAll(data);
+        cachedAlerts = await scanGlobalAlerts(true); // will call server too
     } catch (err) {
         showError(err.message || 'Search failed');
     } finally {
@@ -194,48 +192,42 @@ async function fetchByCityName(q) {
 }
 
 async function reverseGeocode(lat, lon) {
+    // server supports lat & lon — call it, but we only need the name
     try {
-        const res = await fetch(`${GEO_REVERSE}?lat=${lat}&lon=${lon}&limit=1&appid=${API_KEY}`);
+        const res = await fetch(`/api/weather?lat=${lat}&lon=${lon}`);
         if (!res.ok) return null;
-        const arr = await res.json();
-        if (arr && arr[0]) return `${arr[0].name}${arr[0].country ? ', ' + arr[0].country : ''}`;
+        const json = await res.json();
+        return json.name || null;
+    } catch (e) {
         return null;
-    } catch (e) { return null; }
+    }
 }
 
 async function fetchWeatherAndForecast(lat, lon, fitToView = true) {
     showLoading(); clearError();
     try {
-        const [weatherRes, forecastRes] = await Promise.all([
-            fetch(`${WEATHER}?lat=${lat}&lon=${lon}&units=metric&appid=${API_KEY}`),
-            fetch(`${FORECAST}?lat=${lat}&lon=${lon}&units=metric&appid=${API_KEY}`)
-        ]);
-
-        if (weatherRes.status === 401 || forecastRes.status === 401) {
-            showError('API key unauthorized (401). Fix key or use proxy.');
-            hideLoading();
-            return;
-        }
-        if (!weatherRes.ok || !forecastRes.ok) {
+        const res = await fetch(`/api/weather?lat=${lat}&lon=${lon}`);
+        if (!res.ok) {
+            if (res.status === 401) {
+                showError('API key unauthorized (401). Fix key or use proxy.');
+                hideLoading();
+                return;
+            }
             showError('Unable to fetch weather (network/API).');
             hideLoading();
             return;
         }
-
-        const weatherJson = await weatherRes.json();
-        const forecastJson = await forecastRes.json();
-        const synthetic = buildSyntheticOneCall(weatherJson, forecastJson);
-
-        cachedData = { ...synthetic, coord: weatherJson.coord };
+        const json = await res.json();
+        // server returns synthetic { current, hourly, daily } and coord
+        const synthetic = { current: json.current, hourly: json.hourly, daily: json.daily };
+        cachedData = { ...synthetic, coord: json.coord };
         if (fitToView) {
             if (!currentLocationName || currentLocationName === 'Unknown') {
-                const rev = await reverseGeocode(lat, lon);
+                const rev = json.name || await reverseGeocode(lat, lon);
                 if (rev) currentLocationName = rev;
             }
             renderAll(synthetic);
         }
-
-        // cache alerts quietly
         cachedAlerts = await scanGlobalAlerts(true);
     } catch (err) {
         console.error(err);
@@ -245,97 +237,27 @@ async function fetchWeatherAndForecast(lat, lon, fitToView = true) {
     }
 }
 
-// synthetic onecall
-function buildSyntheticOneCall(nowJson, forecastJson) {
-    const current = {
-        dt: nowJson.dt,
-        sunrise: nowJson.sys?.sunrise || null,
-        sunset: nowJson.sys?.sunset || null,
-        temp: nowJson.main.temp,
-        feels_like: nowJson.main.feels_like,
-        pressure: nowJson.main.pressure,
-        humidity: nowJson.main.humidity,
-        dew_point: Math.round(nowJson.main.temp - ((100 - nowJson.main.humidity) / 5)),
-        clouds: nowJson.clouds?.all ?? 0,
-        visibility: nowJson.visibility ?? 10000,
-        wind_speed: nowJson.wind?.speed ?? 0,
-        wind_deg: nowJson.wind?.deg ?? 0,
-        weather: nowJson.weather || [{ id: 800, description: 'clear' }],
-        // Add production-level data (simulated)
-        uvi: Math.random() * 12, // Simulated UV index
-        aqi: Math.random() * 300, // Simulated Air Quality
-    };
-
-    const list = (forecastJson.list || []).slice(0, 40);
-
-    const hourly = [];
-    for (let i = 0; i < list.length; i++) {
-        const it = list[i];
-        for (let k = 0; k < 3; k++) {
-            if (hourly.length >= 24) break;
-            const dt = it.dt + k * 3600;
-            hourly.push({
-                dt,
-                temp: it.main.temp,
-                feels_like: it.main.feels_like,
-                pop: it.pop ?? 0,
-                weather: it.weather || [{ id: 800, description: 'clear' }],
-                wind_speed: it.wind?.speed ?? 0
-            });
-        }
-        if (hourly.length >= 24) break;
-    }
-    while (hourly.length < 24) {
-        const last = hourly[hourly.length - 1] || { dt: current.dt + (hourly.length + 1) * 3600, temp: current.temp, weather: current.weather };
-        hourly.push({ ...last, dt: last.dt + 3600 });
-    }
-
-    const byDate = {};
-    list.forEach(item => {
-        const key = new Date(item.dt * 1000).toISOString().slice(0, 10);
-        if (!byDate[key]) byDate[key] = { temps: [], pops: [], weathers: [], dt: item.dt };
-        byDate[key].temps.push(item.main.temp);
-        byDate[key].pops.push(item.pop ?? 0);
-        if (item.weather && item.weather[0]) byDate[key].weathers.push(item.weather[0]);
-    });
-
-    const keys = Object.keys(byDate).slice(0, 7);
-    const daily = keys.map(k => {
-        const d = byDate[k];
-        const temps = d.temps.length ? d.temps : [current.temp];
-        const pops = d.pops.length ? d.pops : [0];
-        const midWeather = d.weathers.length ? d.weathers[Math.floor(d.weathers.length / 2)] : { id: 800, description: 'clear' };
-        return {
-            dt: d.dt,
-            temp: { max: Math.max(...temps), min: Math.min(...temps) },
-            pop: Math.round((pops.reduce((a, b) => a + b, 0) / pops.length) * 100) / 100,
-            weather: [midWeather]
-        };
-    });
-
-    return { current, hourly, daily };
-}
-
-// alerts scan
+// alerts scan — now calls server endpoint for each city (same shape as before)
 const GLOBAL_CITIES = ['New York', 'London', 'Tokyo', 'New Delhi', 'Sydney', 'Rio de Janeiro', 'Cairo', 'Moscow'];
 async function scanGlobalAlerts(returnArray = false) {
     const results = [];
     try {
         const promises = GLOBAL_CITIES.map(async city => {
-            const geoRes = await fetch(`${GEO_DIRECT}?q=${encodeURIComponent(city)}&limit=1&appid=${API_KEY}`);
-            if (!geoRes.ok) return null;
-            const geo = await geoRes.json();
-            if (!geo || !geo[0]) return null;
-            const { lat, lon } = geo[0];
-            const res = await fetch(`${FORECAST}?lat=${lat}&lon=${lon}&units=metric&appid=${API_KEY}`).then(r => r.ok ? r.json() : null).catch(() => null);
-            if (!res) return null;
-            const flags = [];
-            (res.list || []).slice(0, 16).forEach(item => {
-                if (item.pop && item.pop > 0.7) flags.push({ type: 'heavy-rain', dt: item.dt, pop: item.pop, desc: item.weather?.[0]?.description });
-                if (item.wind && (item.wind.speed || 0) > 12) flags.push({ type: 'strong-wind', dt: item.dt, speed: item.wind.speed });
-            });
-            if (flags.length) return { city, flags };
-            return null;
+            try {
+                const res = await fetch(`/api/weather?q=${encodeURIComponent(city)}`);
+                if (!res.ok) return null;
+                const data = await res.json();
+                // inspect hourly list for flags (use hourly array)
+                const flags = [];
+                (data.hourly || []).slice(0, 16).forEach(item => {
+                    if (item.pop && item.pop > 0.7) flags.push({ type: 'heavy-rain', dt: item.dt, pop: item.pop, desc: item.weather?.[0]?.description });
+                    if (item.wind_speed && (item.wind_speed || 0) > 12) flags.push({ type: 'strong-wind', dt: item.dt, speed: item.wind_speed });
+                });
+                if (flags.length) return { city, flags };
+                return null;
+            } catch (e) {
+                return null;
+            }
         });
 
         const resolved = await Promise.all(promises);
@@ -732,7 +654,8 @@ function createHourlyCard(hourly) {
             const dt = Number(it.getAttribute('data-dt'));
             const h = hours.find(x => x.dt === dt) || hours[0];
             const title = `Forecast — ${new Date(h.dt * 1000).toLocaleString()}`;
-            const paragraph = `Temperature ${toUnitString(h.temp)}. ${h.weather[0].description}. Chance of precipitation ${Math.round(h.pop * 100)}%. Feels like ${toUnitString(h.feels_like || h.temp)}. Wind ${Math.round((h.wind_speed || 0) * 3.6)} km/h.`;
+            const paragraph = `Temperature ${toUnitString(h.temp)}. ${h.weather[0].description}. Chance of precipitation ${Math.round(h.pop * 100)}%. Feels like ${toUnitString(h.feels_like || h.temp)}. Wind ${Math.round((h.wind_speed || 0) * 3.6)} km/h.`; 
+
             showInfoModal(title, paragraph, { 
                 'Time': new Date(h.dt * 1000).toLocaleString(),
                 'Temperature': `${toUnitString(h.temp)}`,
@@ -910,13 +833,18 @@ async function init() {
             if (rev) currentLocationName = rev;
             await fetchWeatherAndForecast(lat, lon, true);
         }, async () => {
-            const geo = await fetch(`${GEO_DIRECT}?q=London&limit=1&appid=${API_KEY}`).then(r => r.ok ? r.json() : null);
-            if (geo && geo[0]) await fetchWeatherAndForecast(geo[0].lat, geo[0].lon, true);
+            // fallback to London using server endpoint
+            const geoFallback = await fetch(`/api/weather?q=London`).then(r => r.ok ? r.json() : null);
+            if (geoFallback && geoFallback.coord) {
+                await fetchWeatherAndForecast(geoFallback.coord.lat, geoFallback.coord.lon, true);
+            }
             hideLoading();
         }, { timeout: 8000 });
     } else {
-        const geo = await fetch(`${GEO_DIRECT}?q=London&limit=1&appid=${API_KEY}`).then(r => r.ok ? r.json() : null);
-        if (geo && geo[0]) await fetchWeatherAndForecast(geo[0].lat, geo[0].lon, true);
+        const geoFallback = await fetch(`/api/weather?q=London`).then(r => r.ok ? r.json() : null);
+        if (geoFallback && geoFallback.coord) {
+            await fetchWeatherAndForecast(geoFallback.coord.lat, geoFallback.coord.lon, true);
+        }
         hideLoading();
     }
 
